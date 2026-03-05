@@ -22,7 +22,7 @@ from telegram.ext import (
 
 # Import new modules
 from technical_analysis import calculate_rsi, detect_trend, get_signal, format_analysis
-from youtube_downloader import get_video_info, download_video, format_size, format_duration
+from universal_downloader import detect_platform, get_media_info, download_media, format_size, suggest_format
 
 # ============================================
 # CONFIG
@@ -373,45 +373,45 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def download_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start /download conversation"""
     await update.message.reply_text(
-        "🎥 YouTube Downloader\n\n"
-        "Send a YouTube link:\n"
-        "(e.g., https://www.youtube.com/watch?v=...)"
+        "⬇️ Universal Downloader\n\n"
+        "Send any media link:\n"
+        "🎥 YouTube, TikTok, Instagram, X, Facebook\n"
+        "🖼️ Images, videos, audio\n\n"
+        "I'll auto-detect and download for you."
     )
     return DOWNLOAD_LINK
 
 
 async def download_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process YouTube link"""
+    """Process any media link"""
     url = update.message.text.strip()
     
-    if not ("youtube.com" in url or "youtu.be" in url):
-        await update.message.reply_text("❌ Invalid YouTube link. Try again.")
+    # Detect platform
+    platform = detect_platform(url)
+    
+    if not platform:
+        await update.message.reply_text("❌ Unsupported link. Try another.")
         return DOWNLOAD_LINK
     
-    await update.message.reply_text("⏳ Fetching video info...")
+    await update.message.reply_text("⏳ Fetching info...")
     
-    info = get_video_info(url)
+    info = get_media_info(url, platform["platform"])
     
-    if not info:
-        await update.message.reply_text("❌ Unable to fetch video info. Try another link.")
-        return DOWNLOAD_LINK
-    
-    # Store URL in context
+    # Store in context
     context.user_data["download_url"] = url
-    context.user_data["video_info"] = info
+    context.user_data["platform"] = platform
+    context.user_data["media_info"] = info
     
     # Show format options
-    duration = format_duration(info["duration"])
-    msg = f"✅ {info['title']}\n"
-    msg += f"⏱ Duration: {duration}\n\n"
-    msg += "Choose format:\n"
-    msg += "1️⃣ MP4 360p\n"
-    msg += "2️⃣ MP4 720p\n"
-    msg += "3️⃣ MP4 1080p\n"
-    msg += "4️⃣ MP3 128k\n"
-    msg += "5️⃣ MP3 192k\n"
-    msg += "6️⃣ MP3 320k\n\n"
-    msg += "Reply with 1-6:"
+    formats = suggest_format(platform["platform"], platform["type"])
+    msg = f"✅ Detected: {platform['platform'].upper()}\n"
+    msg += f"Title: {info['title']}\n\n"
+    msg += "Available formats:\n"
+    
+    for i, fmt in enumerate(formats[:6], 1):  # Show up to 6 formats
+        msg += f"{i}️⃣ {fmt}\n"
+    
+    msg += "\nReply with number:"
     
     await update.message.reply_text(msg)
     return DOWNLOAD_FORMAT
@@ -421,52 +421,64 @@ async def download_format_input(update: Update, context: ContextTypes.DEFAULT_TY
     """Process format choice and download"""
     choice = update.message.text.strip()
     
-    format_map = {
-        "1": "MP4_360p",
-        "2": "MP4_720p",
-        "3": "MP4_1080p",
-        "4": "MP3_128k",
-        "5": "MP3_192k",
-        "6": "MP3_320k",
-    }
-    
-    if choice not in format_map:
-        await update.message.reply_text("❌ Invalid choice. Reply with 1-6.")
-        return DOWNLOAD_FORMAT
-    
-    url = context.user_data.get("download_url")
-    format_choice = format_map[choice]
-    
-    await update.message.reply_text(
-        f"⏳ Downloading as {format_choice}...\n(This may take a minute)"
+    formats = suggest_format(
+        context.user_data["platform"]["platform"],
+        context.user_data["platform"]["type"]
     )
     
-    result = download_video(url, format_choice)
+    try:
+        choice_idx = int(choice) - 1
+        if choice_idx < 0 or choice_idx >= len(formats):
+            await update.message.reply_text(f"❌ Invalid choice. Reply 1-{len(formats)}.")
+            return DOWNLOAD_FORMAT
+    except ValueError:
+        await update.message.reply_text("❌ Please reply with a number.")
+        return DOWNLOAD_FORMAT
+    
+    format_choice = formats[choice_idx]
+    url = context.user_data["download_url"]
+    
+    await update.message.reply_text(
+        f"⏳ Downloading as {format_choice}...\n(May take a minute)"
+    )
+    
+    # Download (no temp files, direct streaming)
+    result = download_media(url, format_choice)
     
     if not result["success"]:
-        await update.message.reply_text(f"❌ Error: {result['error']}")
+        await update.message.reply_text(f"❌ {result['error']}")
         await update.message.reply_text("Try another link or /cancel.")
         return DOWNLOAD_LINK
     
-    # Send file
-    file_path = result["file_path"]
-    file_size = result["file_size"]
-    
+    # Send file directly (no temp storage)
     try:
-        if format_choice.startswith("MP4"):
-            with open(file_path, "rb") as f:
-                await update.message.reply_video(
-                    f,
-                    caption=f"✅ Downloaded\n{format_size(file_size)}"
-                )
-        else:  # MP3
-            with open(file_path, "rb") as f:
-                await update.message.reply_audio(
-                    f,
-                    title=context.user_data["video_info"]["title"]
-                )
+        from io import BytesIO
         
-        await update.message.reply_text("Send another link or /cancel to exit.")
+        file_data = BytesIO(result["data"])
+        file_data.name = result["filename"]
+        
+        if "MP4" in format_choice or result["filename"].endswith(".mp4"):
+            await update.message.reply_video(
+                file_data,
+                caption=f"✅ {format_size(result['size'])}"
+            )
+        elif "MP3" in format_choice or result["filename"].endswith(".mp3"):
+            await update.message.reply_audio(
+                file_data,
+                title=context.user_data["media_info"]["title"]
+            )
+        elif "JPG" in format_choice or result["filename"].endswith((".jpg", ".png")):
+            await update.message.reply_photo(
+                file_data,
+                caption=f"✅ {format_size(result['size'])}"
+            )
+        else:
+            await update.message.reply_document(
+                file_data,
+                caption=f"✅ {format_size(result['size'])}"
+            )
+        
+        await update.message.reply_text("Send another link or /cancel.")
         return DOWNLOAD_LINK
     
     except Exception as e:
@@ -492,14 +504,18 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help command"""
     await update.message.reply_text(
         "📖 ORBIT Pulse Commands:\n\n"
-        "/pulse - Show top 50 cryptocurrencies with pagination\n"
-        "/analyze - Technical analysis (RSI, trend, buy/sell signals)\n"
-        "/download - Download YouTube videos as MP4 or MP3\n"
-        "/help - Show this help message\n"
-        "/start - Welcome message\n\n"
-        "Pro Tips:\n"
-        "• Use /analyze to check RSI and trend for any coin\n"
-        "• Use /download to save YouTube videos in your preferred format"
+        "/pulse - Top 50 cryptocurrencies\n"
+        "/analyze - Technical analysis (RSI, trend, signals)\n"
+        "/download - Download from any platform\n"
+        "/help - Show this message\n"
+        "/start - Welcome\n\n"
+        "Download Supported:\n"
+        "🎥 YouTube, TikTok, Instagram, X, Facebook\n"
+        "🖼️ Images, videos, audio\n\n"
+        "Smart features:\n"
+        "✅ Auto-detect format\n"
+        "✅ No watermarks\n"
+        "✅ Clean, private downloads"
     )
 
 
