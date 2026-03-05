@@ -386,16 +386,32 @@ async def download_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Process any media link"""
     url = update.message.text.strip()
     
+    # Validate URL format
+    if not url.startswith("http"):
+        await update.message.reply_text("❌ Invalid URL. Make sure it starts with http/https.")
+        return DOWNLOAD_LINK
+    
     # Detect platform
     platform = detect_platform(url)
     
     if not platform:
-        await update.message.reply_text("❌ Unsupported link. Try another.")
+        await update.message.reply_text(
+            "❌ Unsupported link.\n\n"
+            "Supported: YouTube, TikTok, Instagram, X, Facebook, Xiaohongshu\n\n"
+            "Send another link:"
+        )
         return DOWNLOAD_LINK
     
-    await update.message.reply_text("⏳ Fetching info...")
+    await update.message.reply_text(f"⏳ Fetching {platform['platform']}...")
     
-    info = get_media_info(url, platform["platform"])
+    try:
+        info = get_media_info(url, platform["platform"])
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Error fetching info: {str(e)[:100]}\n\n"
+            "Try another link:"
+        )
+        return DOWNLOAD_LINK
     
     # Store in context
     context.user_data["download_url"] = url
@@ -411,7 +427,7 @@ async def download_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     for i, fmt in enumerate(formats[:6], 1):  # Show up to 6 formats
         msg += f"{i}️⃣ {fmt}\n"
     
-    msg += "\nReply with number:"
+    msg += "\nReply with number (or /cancel):"
     
     await update.message.reply_text(msg)
     return DOWNLOAD_FORMAT
@@ -581,8 +597,45 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif data.startswith("ci_"):
-        coin_id = data[3:]
-        await query.answer(f"Selected: {coin_id}")
+        # Coin analysis from button click
+        coin_id = data[3:]  # e.g., "bitcoin"
+        
+        # Fetch coin data
+        coins = fetch_top_coins(limit=250)
+        if not coins:
+            await query.answer("⏳ Data unavailable", show_alert=True)
+            return
+        
+        # Find exact coin
+        coin = None
+        for c in coins:
+            if get_coin_short_id(c.get("id", ""))[:len(coin_id)] == coin_id[:10]:
+                coin = c
+                break
+        
+        if not coin:
+            await query.answer("❌ Coin not found", show_alert=True)
+            return
+        
+        # Analyze
+        current_price = coin.get("current_price", 0)
+        change_24h = coin.get("price_change_percentage_24h_in_currency", 0)
+        prices = [current_price * (1 - change_24h/100), current_price]
+        
+        rsi = calculate_rsi(prices)
+        trend = detect_trend(prices)
+        signal_info = get_signal(rsi, trend)
+        
+        analysis = format_analysis(
+            coin.get("name", ""),
+            current_price,
+            rsi,
+            trend,
+            signal_info,
+            change_24h
+        )
+        
+        await query.edit_message_text(analysis)
 
 
 # ============================================
