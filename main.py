@@ -25,6 +25,49 @@ from simple_downloader import detect_platform, download_from_platform
 # Conversation states
 DOWNLOAD_LINK = 0
 
+
+# ============================================
+# COIN ANALYSIS (Simple)
+# ============================================
+def simple_coin_analysis(coin_name, price, change_24h, market_cap, volume):
+    """Simple coin analysis without complex modules"""
+    msg = f"📊 {coin_name.upper()}\n"
+    msg += f"━━━━━━━━━━━━━━━━\n"
+    msg += f"💰 Price: ${price:,.2f}\n"
+    msg += f"24h: {change_24h:+.2f}%\n\n"
+    
+    # Simple trend
+    if change_24h > 5:
+        trend = "🟢 STRONG BULLISH"
+    elif change_24h > 0:
+        trend = "🟢 BULLISH"
+    elif change_24h < -5:
+        trend = "🔴 STRONG BEARISH"
+    else:
+        trend = "🔴 BEARISH"
+    
+    msg += f"Trend: {trend}\n\n"
+    
+    # Market data
+    if market_cap:
+        if market_cap >= 1e12:
+            mcap_str = f"${market_cap / 1e12:.2f}T"
+        elif market_cap >= 1e9:
+            mcap_str = f"${market_cap / 1e9:.2f}B"
+        else:
+            mcap_str = f"${market_cap / 1e6:.2f}M"
+        msg += f"Market Cap: {mcap_str}\n"
+    
+    if volume:
+        if volume >= 1e9:
+            vol_str = f"${volume / 1e9:.2f}B"
+        else:
+            vol_str = f"${volume / 1e6:.2f}M"
+        msg += f"24h Volume: {vol_str}\n"
+    
+    msg += f"\n⚠️ Not financial advice"
+    return msg
+
 # ============================================
 # CONFIG
 # ============================================
@@ -377,8 +420,36 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif data.startswith("ci_"):
-        coin_id = data[3:]
-        await query.answer(f"Selected: {coin_id}")
+        coin_id = data[3:]  # e.g., "bitcoin"
+        
+        # Fetch coin data
+        coins = fetch_top_coins(limit=250)
+        if not coins:
+            await query.answer("⏳ Data unavailable", show_alert=True)
+            return
+        
+        # Find exact coin
+        coin = None
+        for c in coins:
+            c_id = c.get("id", "").lower()[:len(coin_id)]
+            if c_id == coin_id[:len(c_id)]:
+                coin = c
+                break
+        
+        if not coin:
+            await query.answer("❌ Coin not found", show_alert=True)
+            return
+        
+        # Show analysis
+        analysis = simple_coin_analysis(
+            coin.get("name", "Unknown"),
+            coin.get("current_price", 0),
+            coin.get("price_change_percentage_24h_in_currency", 0),
+            coin.get("market_cap"),
+            coin.get("total_volume")
+        )
+        
+        await query.edit_message_text(analysis)
 
 
 # ============================================
