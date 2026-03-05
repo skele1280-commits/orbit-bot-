@@ -14,16 +14,12 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
-    ConversationHandler,
     MessageHandler,
     filters,
 )
 
 # Import downloader
 from simple_downloader import detect_platform, download_from_platform
-
-# Conversation states
-DOWNLOAD_LINK = 0
 
 
 # ============================================
@@ -341,9 +337,11 @@ def build_pagination_keyboard(coins, page=0):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command"""
     await update.message.reply_text(
-        "🚀 Welcome to ORBIT Pulse!\n\n"
-        "/pulse - Top 50 cryptocurrencies\n"
-        "/help - Show all commands"
+        "🚀 ORBIT Pulse Bot\n\n"
+        "/pulse - Top 50 cryptos\n"
+        "/help - Commands\n\n"
+        "✅ Click coin → See details\n"
+        "✅ Send link → Auto-download"
     )
 
 
@@ -352,9 +350,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 ORBIT Pulse Bot\n\n"
         "/pulse - Top 50 cryptocurrencies\n"
-        "/download - Download from YouTube, TikTok, Instagram, X, Facebook\n"
         "/help - This message\n"
-        "/start - Welcome"
+        "/start - Welcome\n\n"
+        "Features:\n"
+        "✅ Click coin → See details\n"
+        "✅ Send link → Auto-download\n"
+        "   (YouTube, TikTok, Instagram, X, Facebook)"
     )
 
 
@@ -453,39 +454,68 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================
-# DOWNLOAD COMMANDS
+# AUTO LINK DETECTION & DOWNLOAD
 # ============================================
-async def download_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start download"""
-    await update.message.reply_text("⬇️ Send a link:\nYouTube, TikTok, Instagram, X, Facebook")
-    return DOWNLOAD_LINK
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Auto-detect and handle links"""
+    text = update.message.text.strip()
+    
+    # Check if it's a link
+    if not text.startswith("http"):
+        return  # Not a link, ignore
+    
+    platform = detect_platform(text)
+    
+    if not platform:
+        return  # Not supported, ignore
+    
+    # Store link for format selection
+    context.user_data["download_link"] = text
+    context.user_data["download_platform"] = platform
+    
+    # Show format options
+    msg = f"🔗 {platform} link detected!\n\n"
+    msg += "Choose format:\n"
+    msg += "1️⃣ Best Quality (MP4)\n"
+    msg += "2️⃣ Audio Only (MP3)\n"
+    msg += "3️⃣ High Quality\n\n"
+    msg += "Reply with number:"
+    
+    await update.message.reply_text(msg)
 
 
-async def download_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle download link"""
-    url = update.message.text.strip()
+async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle format choice and download"""
+    choice = update.message.text.strip()
     
-    if not url.startswith("http"):
-        await update.message.reply_text("❌ Invalid URL. Start with http/https")
-        return DOWNLOAD_LINK
+    # Only process if they recently sent a link
+    if "download_link" not in context.user_data:
+        return  # Not in download context
     
-    if not detect_platform(url):
-        await update.message.reply_text("❌ Unsupported link. Try YouTube, TikTok, Instagram, X, Facebook")
-        return DOWNLOAD_LINK
+    if choice not in ["1", "2", "3"]:
+        return  # Invalid choice, ignore
     
-    status = await update.message.reply_text(f"⏳ Downloading...")
+    url = context.user_data["download_link"]
+    platform = context.user_data["download_platform"]
+    
+    status = await update.message.reply_text(f"⏳ Downloading from {platform}...\nPlease wait (1-2 min)")
+    
+    # Download
     result = download_from_platform(url)
     
     if not result["success"]:
-        await status.edit_text(f"❌ {result['error']}")
-        return DOWNLOAD_LINK
+        await status.edit_text(f"❌ Failed: {result['error']}")
+        context.user_data.pop("download_link", None)
+        context.user_data.pop("download_platform", None)
+        return
     
     try:
         from io import BytesIO
+        
         file_data = BytesIO(result["data"])
         file_data.name = result["filename"]
         
-        await status.edit_text(f"✅ Done! Sending...")
+        await status.edit_text(f"✅ Downloaded! Sending...")
         
         if result["filename"].endswith(".mp4"):
             await update.message.reply_video(file_data)
@@ -494,17 +524,14 @@ async def download_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             await update.message.reply_document(file_data)
         
-        await update.message.reply_text("✅ Done!\n\nSend another link or /cancel")
+        await update.message.reply_text("✅ Done!")
+        
     except Exception as e:
         await update.message.reply_text(f"❌ Send failed: {str(e)[:50]}")
     
-    return DOWNLOAD_LINK
-
-
-async def cancel_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel download"""
-    await update.message.reply_text("Cancelled")
-    return ConversationHandler.END
+    finally:
+        context.user_data.pop("download_link", None)
+        context.user_data.pop("download_platform", None)
 
 
 # ============================================
@@ -519,22 +546,18 @@ def main():
     print("🚀 Starting ORBIT Pulse Bot...")
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Download conversation handler
-    download_handler = ConversationHandler(
-        entry_points=[CommandHandler("download", download_cmd)],
-        states={
-            DOWNLOAD_LINK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, download_link_input),
-            ]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_download)],
-    )
-    
-    # Handlers
+    # Handlers (order matters - most specific first)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("pulse", pulse))
-    app.add_handler(download_handler)
+    
+    # Link detection (catches http/https links)
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"^https?://"), handle_link))
+    
+    # Format choice handler (catches numbers 1-3)
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"^[1-3]$"), handle_format_choice))
+    
+    # Callback buttons
     app.add_handler(CallbackQueryHandler(handle_callback))
     
     print("✅ Bot started. Polling...")
