@@ -2,6 +2,7 @@
 """
 ORBIT Pulse Bot - Telegram Crypto Trading Bot
 Shows top 50 cryptocurrencies with pagination
+Includes technical analysis and YouTube downloader
 """
 
 import os
@@ -14,7 +15,14 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
 )
+
+# Import new modules
+from technical_analysis import calculate_rsi, detect_trend, get_signal, format_analysis
+from youtube_downloader import get_video_info, download_video, format_size, format_duration
 
 # ============================================
 # CONFIG
@@ -284,6 +292,189 @@ def build_pagination_keyboard(coins, page=0):
 
 
 # ============================================
+# CONVERSATION HANDLERS (States)
+# ============================================
+ANALYZE_COIN, DOWNLOAD_LINK, DOWNLOAD_FORMAT = range(3)
+
+
+# ============================================
+# ANALYZE COMMAND
+# ============================================
+async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start /analyze conversation"""
+    await update.message.reply_text(
+        "📊 Technical Analysis\n\n"
+        "Enter a coin symbol (e.g., BTC, ETH, SOL) to analyze:"
+    )
+    return ANALYZE_COIN
+
+
+async def analyze_coin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process coin symbol input"""
+    coin_symbol = update.message.text.upper().strip()
+    
+    # Fetch coin data
+    coins = fetch_top_coins(limit=250)  # Get more coins to find the one requested
+    
+    if not coins:
+        await update.message.reply_text("⏳ Unable to fetch data. Try again.")
+        return ConversationHandler.END
+    
+    # Find coin by symbol
+    coin = None
+    for c in coins:
+        if c.get("symbol") == coin_symbol:
+            coin = c
+            break
+    
+    if not coin:
+        await update.message.reply_text(
+            f"❌ Coin '{coin_symbol}' not found.\n\n"
+            "Try another symbol."
+        )
+        return ANALYZE_COIN
+    
+    # Get price history (mock - using market data as proxy)
+    current_price = coin.get("current_price", 0)
+    change_24h = coin.get("price_change_percentage_24h_in_currency", 0)
+    
+    # Mock price history for RSI calculation
+    # In production, fetch real historical data
+    prices = [current_price * (1 - change_24h/100), current_price]
+    
+    # Calculate RSI (with mock data)
+    rsi = calculate_rsi(prices)
+    trend = detect_trend(prices)
+    signal_info = get_signal(rsi, trend)
+    
+    analysis = format_analysis(
+        coin.get("name", coin_symbol),
+        current_price,
+        rsi,
+        trend,
+        signal_info,
+        change_24h
+    )
+    
+    await update.message.reply_text(analysis)
+    await update.message.reply_text("Enter another coin symbol or /cancel to exit.")
+    return ANALYZE_COIN
+
+
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel conversation"""
+    await update.message.reply_text("❌ Cancelled.")
+    return ConversationHandler.END
+
+
+# ============================================
+# DOWNLOAD COMMAND
+# ============================================
+async def download_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start /download conversation"""
+    await update.message.reply_text(
+        "🎥 YouTube Downloader\n\n"
+        "Send a YouTube link:\n"
+        "(e.g., https://www.youtube.com/watch?v=...)"
+    )
+    return DOWNLOAD_LINK
+
+
+async def download_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process YouTube link"""
+    url = update.message.text.strip()
+    
+    if not ("youtube.com" in url or "youtu.be" in url):
+        await update.message.reply_text("❌ Invalid YouTube link. Try again.")
+        return DOWNLOAD_LINK
+    
+    await update.message.reply_text("⏳ Fetching video info...")
+    
+    info = get_video_info(url)
+    
+    if not info:
+        await update.message.reply_text("❌ Unable to fetch video info. Try another link.")
+        return DOWNLOAD_LINK
+    
+    # Store URL in context
+    context.user_data["download_url"] = url
+    context.user_data["video_info"] = info
+    
+    # Show format options
+    duration = format_duration(info["duration"])
+    msg = f"✅ {info['title']}\n"
+    msg += f"⏱ Duration: {duration}\n\n"
+    msg += "Choose format:\n"
+    msg += "1️⃣ MP4 360p\n"
+    msg += "2️⃣ MP4 720p\n"
+    msg += "3️⃣ MP4 1080p\n"
+    msg += "4️⃣ MP3 128k\n"
+    msg += "5️⃣ MP3 192k\n"
+    msg += "6️⃣ MP3 320k\n\n"
+    msg += "Reply with 1-6:"
+    
+    await update.message.reply_text(msg)
+    return DOWNLOAD_FORMAT
+
+
+async def download_format_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process format choice and download"""
+    choice = update.message.text.strip()
+    
+    format_map = {
+        "1": "MP4_360p",
+        "2": "MP4_720p",
+        "3": "MP4_1080p",
+        "4": "MP3_128k",
+        "5": "MP3_192k",
+        "6": "MP3_320k",
+    }
+    
+    if choice not in format_map:
+        await update.message.reply_text("❌ Invalid choice. Reply with 1-6.")
+        return DOWNLOAD_FORMAT
+    
+    url = context.user_data.get("download_url")
+    format_choice = format_map[choice]
+    
+    await update.message.reply_text(
+        f"⏳ Downloading as {format_choice}...\n(This may take a minute)"
+    )
+    
+    result = download_video(url, format_choice)
+    
+    if not result["success"]:
+        await update.message.reply_text(f"❌ Error: {result['error']}")
+        await update.message.reply_text("Try another link or /cancel.")
+        return DOWNLOAD_LINK
+    
+    # Send file
+    file_path = result["file_path"]
+    file_size = result["file_size"]
+    
+    try:
+        if format_choice.startswith("MP4"):
+            with open(file_path, "rb") as f:
+                await update.message.reply_video(
+                    f,
+                    caption=f"✅ Downloaded\n{format_size(file_size)}"
+                )
+        else:  # MP3
+            with open(file_path, "rb") as f:
+                await update.message.reply_audio(
+                    f,
+                    title=context.user_data["video_info"]["title"]
+                )
+        
+        await update.message.reply_text("Send another link or /cancel to exit.")
+        return DOWNLOAD_LINK
+    
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to send: {str(e)}")
+        return DOWNLOAD_LINK
+
+
+# ============================================
 # COMMANDS
 # ============================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -291,6 +482,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 Welcome to ORBIT Pulse!\n\n"
         "/pulse - Top 50 cryptocurrencies\n"
+        "/analyze - Technical analysis of a coin\n"
+        "/download - Download YouTube videos\n"
         "/help - Show all commands"
     )
 
@@ -300,8 +493,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 ORBIT Pulse Commands:\n\n"
         "/pulse - Show top 50 cryptocurrencies with pagination\n"
+        "/analyze - Technical analysis (RSI, trend, buy/sell signals)\n"
+        "/download - Download YouTube videos as MP4 or MP3\n"
         "/help - Show this help message\n"
-        "/start - Welcome message"
+        "/start - Welcome message\n\n"
+        "Pro Tips:\n"
+        "• Use /analyze to check RSI and trend for any coin\n"
+        "• Use /download to save YouTube videos in your preferred format"
     )
 
 
@@ -383,10 +581,37 @@ def main():
     print("🚀 Starting ORBIT Pulse Bot...")
     app = Application.builder().token(BOT_TOKEN).build()
     
+    # Analyze conversation handler
+    analyze_handler = ConversationHandler(
+        entry_points=[CommandHandler("analyze", analyze_cmd)],
+        states={
+            ANALYZE_COIN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_coin_input),
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_cmd)],
+    )
+    
+    # Download conversation handler
+    download_handler = ConversationHandler(
+        entry_points=[CommandHandler("download", download_cmd)],
+        states={
+            DOWNLOAD_LINK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, download_link_input),
+            ],
+            DOWNLOAD_FORMAT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, download_format_input),
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_cmd)],
+    )
+    
     # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("pulse", pulse))
+    app.add_handler(analyze_handler)
+    app.add_handler(download_handler)
     app.add_handler(CallbackQueryHandler(handle_callback))
     
     print("✅ Bot started. Polling...")
