@@ -1,14 +1,13 @@
 """
 Universal Smart Downloader
 Handles YouTube, TikTok, Instagram, X, Facebook, Xiaohongshu, and generic links
-No caching, no temp files - direct streaming
 """
 
 import subprocess
-import io
 import requests
+import os
+import tempfile
 from pathlib import Path
-from urllib.parse import urlparse
 
 
 def detect_platform(url):
@@ -26,7 +25,7 @@ def detect_platform(url):
         ("youtube.com", "youtu.be"): "youtube",
         ("tiktok.com", "vm.tiktok.com", "vt.tiktok.com"): "tiktok",
         ("instagram.com", "instagr.am"): "instagram",
-        ("twitter.com", "x.com"): "x",
+        ("twitter.com", "x.com", "reddit.com"): "x",
         ("facebook.com", "fb.watch"): "facebook",
         ("xiaohongshu.com", "xhslink.com"): "xiaohongshu",
     }
@@ -49,8 +48,6 @@ def detect_platform(url):
     
     # Determine media type by platform
     media_type = "video"  # Most platforms are video
-    if detected_platform == "x":
-        media_type = "video"  # Can be video or image, but default video
     
     return {
         "platform": detected_platform,
@@ -60,15 +57,9 @@ def detect_platform(url):
 
 
 def get_media_info(url, platform):
-    """
-    Get media information without downloading
-    
-    Returns:
-        dict with title, duration (if video), size estimate, format suggestions
-    """
+    """Get media information"""
     try:
         if platform.startswith("generic"):
-            # For generic links, just get file size
             resp = requests.head(url, timeout=5, allow_redirects=True)
             size = resp.headers.get("content-length", "unknown")
             filename = url.split("/")[-1].split("?")[0]
@@ -101,33 +92,24 @@ def get_media_info(url, platform):
 
 
 def suggest_format(platform, media_type):
-    """
-    Suggest best format for platform/type combination
-    
-    Returns:
-        list of format suggestions
-    """
+    """Suggest best format for platform"""
     suggestions = {
         "youtube": ["MP4 720p", "MP4 1080p", "MP3 320k"],
-        "tiktok": ["MP4 720p (no watermark)", "MP3 128k"],
-        "instagram": ["MP4 720p", "JPG (original)"],
-        "x": ["MP4 original", "JPG"],
+        "tiktok": ["MP4 720p", "MP3 128k"],
+        "instagram": ["MP4 720p", "JPG"],
+        "x": ["MP4 720p", "JPG"],
         "facebook": ["MP4 720p"],
-        "xiaohongshu": ["MP4 720p", "JPG (original)"],
-        "generic_video": ["MP4 original"],
-        "generic_audio": ["MP3 original"],
-        "generic_image": ["JPG original"],
+        "xiaohongshu": ["MP4 720p", "JPG"],
+        "generic_video": ["MP4 Original"],
+        "generic_audio": ["MP3 Original"],
+        "generic_image": ["JPG Original"],
     }
     return suggestions.get(platform, ["Original"])
 
 
 def download_media(url, format_choice="best"):
     """
-    Download media and return as bytes (no temp files)
-    
-    Args:
-        url: str media URL
-        format_choice: str format choice (e.g., "MP4 720p")
+    Download media using yt-dlp
     
     Returns:
         dict: {
@@ -138,6 +120,8 @@ def download_media(url, format_choice="best"):
             "error": str or None
         }
     """
+    temp_file = None
+    
     try:
         platform = detect_platform(url)
         if not platform:
@@ -151,13 +135,14 @@ def download_media(url, format_choice="best"):
         
         plat = platform["platform"]
         
-        # Generic links - direct download
+        # For generic direct links, just download
         if plat.startswith("generic"):
             try:
-                resp = requests.get(url, timeout=30)
+                resp = requests.get(url, timeout=30, stream=True)
                 if resp.status_code == 200:
+                    data = resp.content
                     filename = url.split("/")[-1].split("?")[0] or "download"
-                    size = len(resp.content)
+                    size = len(data)
                     
                     if size > 50 * 1024 * 1024:
                         return {
@@ -170,7 +155,7 @@ def download_media(url, format_choice="best"):
                     
                     return {
                         "success": True,
-                        "data": resp.content,
+                        "data": data,
                         "filename": filename,
                         "size": size,
                         "error": None
@@ -184,73 +169,92 @@ def download_media(url, format_choice="best"):
                     "error": f"Download failed: {str(e)}"
                 }
         
-        # Social platforms - use yt-dlp
-        # Determine format codes
-        format_code = "best"
-        if "720p" in format_choice or "1080p" in format_choice:
+        # For social platforms, use yt-dlp to temp file
+        # Create temp directory
+        temp_dir = tempfile.gettempdir()
+        temp_file = os.path.join(temp_dir, f"orbit_{os.urandom(8).hex()}")
+        
+        # Determine format
+        if "MP3" in format_choice or "audio" in plat:
+            format_code = "bestaudio"
+            output_template = f"{temp_file}.mp3"
+            postproc = ["-x", "--audio-format", "mp3", "--audio-quality", "192"]
+        elif "1080p" in format_choice:
             format_code = "best[height<=1080]"
+            output_template = f"{temp_file}.mp4"
+            postproc = []
+        elif "720p" in format_choice:
+            format_code = "best[height<=720]"
+            output_template = f"{temp_file}.mp4"
+            postproc = []
         elif "360p" in format_choice:
             format_code = "best[height<=360]"
-        elif "320k" in format_choice or "192k" in format_choice or "128k" in format_choice:
-            format_code = "bestaudio"
+            output_template = f"{temp_file}.mp4"
+            postproc = []
+        else:
+            format_code = "best"
+            output_template = f"{temp_file}.mp4"
+            postproc = []
         
-        # Use yt-dlp to download to pipe (not to file)
-        cmd = [
-            "yt-dlp",
-            "-f", format_code,
-            "-o", "-",  # Output to stdout
-            "--no-warnings",
-            url
-        ]
+        # Build command
+        cmd = ["yt-dlp", "-f", format_code, "-o", output_template, "--no-warnings", url]
         
-        # For TikTok: no watermark option
-        if plat == "tiktok":
-            cmd = [
-                "yt-dlp",
-                "-f", "best",
-                "-o", "-",
-                "--no-warnings",
-                "--postprocessor-args", "-c:v libx264 -preset fast",
-                url
-            ]
+        # Add post-processing if needed
+        if postproc:
+            cmd.extend(postproc)
         
-        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        # Download
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         
         if result.returncode != 0:
-            error_msg = result.stderr.decode() if result.stderr else "Download failed"
+            error_msg = result.stderr if result.stderr else "Download failed"
             return {
                 "success": False,
                 "data": None,
                 "filename": None,
                 "size": 0,
-                "error": error_msg.split("\n")[0] if error_msg else "Download failed"
+                "error": error_msg.split("\n")[0][:150]
             }
         
-        data = result.stdout
+        # Find the actual file (might have different extension)
+        actual_file = None
+        for ext in [".mp4", ".mp3", ".jpg", ".png", ".webp"]:
+            if os.path.exists(f"{temp_file}{ext}"):
+                actual_file = f"{temp_file}{ext}"
+                break
+        
+        if not actual_file or not os.path.exists(actual_file):
+            return {
+                "success": False,
+                "data": None,
+                "filename": None,
+                "size": 0,
+                "error": "File not created"
+            }
+        
+        # Read file
+        with open(actual_file, "rb") as f:
+            data = f.read()
+        
         size = len(data)
         
-        # Check size limit
+        # Check size
         if size > 50 * 1024 * 1024:
             return {
                 "success": False,
                 "data": None,
                 "filename": None,
                 "size": size,
-                "error": f"File too large: {size / 1024 / 1024:.1f}MB (limit 50MB). Try lower quality."
+                "error": f"File too large: {size / 1024 / 1024:.1f}MB (max 50MB). Try lower quality."
             }
         
         # Generate filename
         info = get_media_info(url, plat)
         title = info.get("title", "download")
-        # Sanitize filename
-        title = "".join(c for c in title if c.isalnum() or c in "-_").rstrip()
+        title = "".join(c for c in title if c.isalnum() or c in "-_ ").rstrip()[:30]
         
-        if "MP3" in format_choice or "audio" in plat:
-            filename = f"{title}.mp3"
-        elif "JPG" in format_choice:
-            filename = f"{title}.jpg"
-        else:
-            filename = f"{title}.mp4"
+        ext = os.path.splitext(actual_file)[1]
+        filename = f"{title}{ext}"
         
         return {
             "success": True,
@@ -274,8 +278,18 @@ def download_media(url, format_choice="best"):
             "data": None,
             "filename": None,
             "size": 0,
-            "error": str(e)
+            "error": str(e)[:150]
         }
+    
+    finally:
+        # Cleanup temp file
+        if temp_file:
+            for ext in [".mp4", ".mp3", ".jpg", ".png", ".webp", ""]:
+                try:
+                    if os.path.exists(f"{temp_file}{ext}"):
+                        os.remove(f"{temp_file}{ext}")
+                except:
+                    pass
 
 
 def format_size(bytes_size):

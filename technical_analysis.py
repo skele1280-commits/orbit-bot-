@@ -3,6 +3,8 @@ Technical Analysis Module for Crypto Bot
 Provides RSI, trend detection, and buy/sell signals
 """
 
+from datetime import datetime
+
 def calculate_rsi(prices, period=14):
     """
     Calculate Relative Strength Index (RSI)
@@ -211,6 +213,3 @@ def format_mvol(vol):
     elif vol >= 1e6:
         return f"${vol / 1e6:.2f}M"
     return f"${vol:,.0f}"
-
-
-from datetime import datetime
