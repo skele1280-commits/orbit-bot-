@@ -22,7 +22,7 @@ from telegram.ext import (
 
 # Import new modules
 from technical_analysis import calculate_rsi, detect_trend, get_signal, format_analysis, format_pro_analysis
-from universal_downloader import detect_platform, get_media_info, download_media, format_size, suggest_format
+from simple_downloader import detect_platform, download_from_platform
 
 # ============================================
 # CONFIG
@@ -294,7 +294,7 @@ def build_pagination_keyboard(coins, page=0):
 # ============================================
 # CONVERSATION HANDLERS (States)
 # ============================================
-ANALYZE_COIN, DOWNLOAD_LINK, DOWNLOAD_FORMAT = range(3)
+ANALYZE_COIN, DOWNLOAD_LINK = range(2)
 
 
 # ============================================
@@ -373,11 +373,9 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def download_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start /download conversation"""
     await update.message.reply_text(
-        "⬇️ Universal Downloader\n\n"
-        "Send any media link:\n"
-        "🎥 YouTube, TikTok, Instagram, X, Facebook\n"
-        "🖼️ Images, videos, audio\n\n"
-        "I'll auto-detect and download for you."
+        "⬇️ Download from any link\n\n"
+        "🎥 YouTube, TikTok, Instagram, X, Facebook\n\n"
+        "Send the link:"
     )
     return DOWNLOAD_LINK
 
@@ -386,9 +384,9 @@ async def download_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Process any media link"""
     url = update.message.text.strip()
     
-    # Validate URL format
+    # Validate URL
     if not url.startswith("http"):
-        await update.message.reply_text("❌ Invalid URL. Make sure it starts with http/https.")
+        await update.message.reply_text("❌ Invalid URL. Must start with http/https\n\nTry again:")
         return DOWNLOAD_LINK
     
     # Detect platform
@@ -396,141 +394,48 @@ async def download_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     if not platform:
         await update.message.reply_text(
-            "❌ Unsupported link.\n\n"
-            "Supported: YouTube, TikTok, Instagram, X, Facebook, Xiaohongshu\n\n"
+            "❌ Not supported.\n\n"
+            "Try: YouTube, TikTok, Instagram, X, Facebook\n\n"
             "Send another link:"
         )
         return DOWNLOAD_LINK
     
-    await update.message.reply_text(f"⏳ Fetching {platform['platform']}...")
+    # Start download
+    status_msg = await update.message.reply_text(f"⏳ Downloading from {platform}...\n\nPlease wait (1-2 min)")
     
     try:
-        info = get_media_info(url, platform["platform"])
+        result = download_from_platform(url)
     except Exception as e:
-        await update.message.reply_text(
-            f"❌ Error fetching info: {str(e)[:100]}\n\n"
-            "Try another link:"
-        )
-        return DOWNLOAD_LINK
-    
-    # Store in context
-    context.user_data["download_url"] = url
-    context.user_data["platform"] = platform
-    context.user_data["media_info"] = info
-    
-    # Show format options
-    formats = suggest_format(platform["platform"], platform["type"])
-    msg = f"✅ Detected: {platform['platform'].upper()}\n"
-    msg += f"Title: {info['title']}\n\n"
-    msg += "Available formats:\n"
-    
-    for i, fmt in enumerate(formats[:6], 1):  # Show up to 6 formats
-        msg += f"{i}️⃣ {fmt}\n"
-    
-    msg += "\nReply with number (or /cancel):"
-    
-    await update.message.reply_text(msg)
-    return DOWNLOAD_FORMAT
-
-
-async def download_format_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process format choice and download"""
-    choice = update.message.text.strip()
-    
-    # Validate choice exists
-    if not context.user_data.get("platform"):
-        await update.message.reply_text("❌ Session expired. Send /download again.")
-        return ConversationHandler.END
-    
-    formats = suggest_format(
-        context.user_data["platform"]["platform"],
-        context.user_data["platform"]["type"]
-    )
-    
-    try:
-        choice_idx = int(choice) - 1
-        if choice_idx < 0 or choice_idx >= len(formats):
-            await update.message.reply_text(f"❌ Invalid choice. Reply 1-{len(formats)}.")
-            return DOWNLOAD_FORMAT
-    except ValueError:
-        await update.message.reply_text("❌ Please reply with a number.")
-        return DOWNLOAD_FORMAT
-    
-    format_choice = formats[choice_idx]
-    url = context.user_data["download_url"]
-    platform = context.user_data["platform"]["platform"]
-    
-    status_msg = await update.message.reply_text(
-        f"⏳ Downloading {platform}...\n"
-        f"Format: {format_choice}\n"
-        f"This may take 1-2 minutes..."
-    )
-    
-    # Download (no temp files, direct streaming)
-    try:
-        result = download_media(url, format_choice)
-    except Exception as e:
-        await status_msg.edit_text(
-            f"❌ Download failed\n\n"
-            f"Error: {str(e)[:150]}\n\n"
-            f"Try another link or /cancel."
-        )
+        await status_msg.edit_text(f"❌ Error: {str(e)[:100]}\n\nTry another link")
         return DOWNLOAD_LINK
     
     if not result["success"]:
-        await status_msg.edit_text(
-            f"❌ Download failed\n\n"
-            f"Error: {result['error']}\n\n"
-            f"Try another link or /cancel."
-        )
+        await status_msg.edit_text(f"❌ Failed: {result['error']}\n\nTry another link")
         return DOWNLOAD_LINK
     
-    # Send file directly (no temp storage)
+    # Send file
     try:
         from io import BytesIO
         
         file_data = BytesIO(result["data"])
         file_data.name = result["filename"]
         
-        await status_msg.edit_text(
-            f"✅ Download successful!\n"
-            f"Size: {format_size(result['size'])}\n"
-            f"Sending to you..."
-        )
+        await status_msg.edit_text(f"✅ Done! {result['size'] / 1024 / 1024:.1f}MB\n\nSending...")
         
-        if "MP4" in format_choice or result["filename"].endswith(".mp4"):
-            await update.message.reply_video(
-                file_data,
-                caption=f"✅ Downloaded\n{format_size(result['size'])}"
-            )
-        elif "MP3" in format_choice or result["filename"].endswith(".mp3"):
-            await update.message.reply_audio(
-                file_data,
-                title=context.user_data["media_info"]["title"]
-            )
-        elif "JPG" in format_choice or result["filename"].endswith((".jpg", ".png")):
-            await update.message.reply_photo(
-                file_data,
-                caption=f"✅ Downloaded\n{format_size(result['size'])}"
-            )
+        if result["filename"].endswith(".mp4"):
+            await update.message.reply_video(file_data)
+        elif result["filename"].endswith(".mp3"):
+            await update.message.reply_audio(file_data)
+        elif result["filename"].endswith((".jpg", ".png")):
+            await update.message.reply_photo(file_data)
         else:
-            await update.message.reply_document(
-                file_data,
-                caption=f"✅ Downloaded\n{format_size(result['size'])}"
-            )
+            await update.message.reply_document(file_data)
         
-        await update.message.reply_text(
-            "✅ Complete!\n\n"
-            "Send another link or /cancel."
-        )
+        await update.message.reply_text("✅ Done!\n\nSend another link or /cancel")
         return DOWNLOAD_LINK
     
     except Exception as e:
-        await update.message.reply_text(
-            f"❌ Failed to send file\n\n"
-            f"Error: {str(e)[:150]}\n\n"
-            f"The download worked but couldn't send. Try again or /cancel."
-        )
+        await update.message.reply_text(f"❌ Send failed: {str(e)[:50]}\n\nTry /cancel")
         return DOWNLOAD_LINK
 
 
@@ -540,30 +445,28 @@ async def download_format_input(update: Update, context: ContextTypes.DEFAULT_TY
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command"""
     await update.message.reply_text(
-        "🚀 Welcome to ORBIT Pulse!\n\n"
-        "/pulse - Top 50 cryptocurrencies\n"
-        "/analyze - Technical analysis of a coin\n"
-        "/download - Download YouTube videos\n"
-        "/help - Show all commands"
+        "🚀 ORBIT Pulse Bot\n\n"
+        "📊 /pulse - Top 50 cryptos\n"
+        "📈 /analyze - Trader analysis\n"
+        "⬇️ /download - Videos & images\n"
+        "❓ /help - All commands\n\n"
+        "Ready to help! 🤖"
     )
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help command"""
     await update.message.reply_text(
-        "📖 ORBIT Pulse Commands:\n\n"
+        "📖 ORBIT Pulse Bot\n\n"
         "/pulse - Top 50 cryptocurrencies\n"
-        "/analyze - Technical analysis (RSI, trend, signals)\n"
-        "/download - Download from any platform\n"
-        "/help - Show this message\n"
-        "/start - Welcome\n\n"
-        "Download Supported:\n"
-        "🎥 YouTube, TikTok, Instagram, X, Facebook\n"
-        "🖼️ Images, videos, audio\n\n"
-        "Smart features:\n"
-        "✅ Auto-detect format\n"
-        "✅ No watermarks\n"
-        "✅ Clean, private downloads"
+        "/analyze - Coin analysis & signals\n"
+        "/download - Download from YouTube, TikTok, Instagram, X, Facebook\n"
+        "/help - This message\n\n"
+        "Features:\n"
+        "✅ Pro trader analysis with signals\n"
+        "✅ Download videos & images (no watermarks)\n"
+        "✅ Private, no logging\n\n"
+        "Just send links - we handle the rest!"
     )
 
 
@@ -707,9 +610,6 @@ def main():
         states={
             DOWNLOAD_LINK: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, download_link_input),
-            ],
-            DOWNLOAD_FORMAT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, download_format_input),
             ]
         },
         fallbacks=[CommandHandler("cancel", cancel_cmd)],
